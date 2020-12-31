@@ -3,11 +3,14 @@ from tensorflow.keras.layers import (
     Conv2D, 
     Conv2DTranspose, 
     MaxPooling2D,
-    UpSample2D,
+    UpSampling2D,
     Flatten,
     Dropout,
     Dense,
 )
+from tqdm import tqdm
+import numpy as np
+import pdb
 
 class MLP(tf.Module):
     def __init__(self, n_classes, dropout=0.2, name=None):
@@ -36,7 +39,7 @@ class AutoEncoder(tf.Module):
         super().__init__(name=name)
         # operations
         self.pool_2x2 = MaxPooling2D((2,2), padding='same')
-        self.upsample_2x2 = UpSample2D((2,2))
+        self.UpSampling_2x2 = UpSampling2D((2,2))
         # encoder layers
         self.e1 = Conv2D(64, (3, 3), activation='relu', padding='same')
         self.e2 = Conv2D(32, (3, 3), activation='relu', padding='same')
@@ -62,25 +65,24 @@ class AutoEncoder(tf.Module):
 
     def decoder(self, x):
         x = self.d1(x)
-        x = self.upsample_2x2(x)
+        x = self.UpSampling_2x2(x)
         x = self.d2(x)
-        x = self.upsample_2x2(x)
+        x = self.UpSampling_2x2(x)
         x = self.d3(x)
-        x = self.upsample_2x2(x)
         return self.reconstruction(x)
 
 class AE_w_predicter(tf.Module):
-    def __init__(self, adversarial=False, name=None):
+    def __init__(self, n_classes, adversarial=True, name=None):
         super().__init__(name=name)
         self.AE = AutoEncoder()
-        self.predicter = MLP()
+        self.predicter = MLP(n_classes=n_classes)
         self.adversarial = adversarial
         self.compiled = False
 
     def _compile(self):
         # default compillation
         self.compiled = True
-        self.pred_loss = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
+        self.pred_loss = tf.keras.losses.CategoricalCrossentropy()
         self.pred_optim = tf.keras.optimizers.Adam()
         self.pred_lambda = 1.0
         self.ae_loss = tf.keras.losses.MeanSquaredError()
@@ -96,7 +98,6 @@ class AE_w_predicter(tf.Module):
         ae_optim,
         ae_lambda
     ):
-        #tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
         self.compiled = True
         self.pred_loss = pred_loss
         self.pred_optim = pred_optim
@@ -108,15 +109,19 @@ class AE_w_predicter(tf.Module):
     def __call__(self, x):
         encoded = self.AE.encoder(x)
         decoded = self.AE.decoder(encoded)
-        representation = self.flatten(encoded)
+        representation = self.AE.latent(encoded)
         class_prediction = self.predicter(representation)
         return decoded, class_prediction
 
-    def _step(self, batch):
+    @property
+    def _pred_loss_if_random(self):
+        1.0/self
+
+    def _step(self, input_imgs, classes):
         assert self.compiled, 'cannot take a step without setting an optimizer and loss function'
-        input_imgs, classes = batch
-        with tf.GradientTape as tape:
+        with tf.GradientTape(persistent=True) as tape:
             reconstruction, prediction = self.__call__(input_imgs)
+            #pdb.set_trace()
             pred_loss = self.pred_loss(classes, prediction)
             ae_loss = self.ae_loss(input_imgs, reconstruction)
             loss = self.ae_lambda * ae_loss
@@ -126,9 +131,39 @@ class AE_w_predicter(tf.Module):
                 loss = loss + adv_pred_loss
         ae_grads = tape.gradient(loss, self.AE.trainable_variables)
         pred_grads = tape.gradient(pred_loss, self.predicter.trainable_variables)
-        self.ae_optim.optimizer.apply_gradients(zip(ae_grads, self.AE.trainable_variables))
-        self.pred_optim.optimizer.apply_gradients(zip(pred_grads, self.predicter.trainable_variables))
-        return loss
+        self.ae_optim.apply_gradients(zip(ae_grads, self.AE.trainable_variables))
+        self.pred_optim.apply_gradients(zip(pred_grads, self.predicter.trainable_variables))
+        return loss, ae_loss, pred_loss
 
     def train(self, images, labels, batch_size, n_epochs):
-        pass
+        size = labels.shape[0]
+        order = np.arange(size)
+        n_batches = size // batch_size + (size % batch_size > 0)
+        for epoch in range(n_epochs):
+            progress = tqdm(
+                total = n_batches,
+                desc = f'Epoch {epoch + 1}/{n_epochs}',
+                unit = 'Batch'
+            )
+            np.random.shuffle(order)
+            losses = []
+            ae_losses = []
+            pred_losses = []
+            for i in range(n_batches):
+                batch_idx = order[i * batch_size:(i+1) * batch_size]
+                input_imgs = images[batch_idx]
+                classes = labels[batch_idx]
+                loss, ae_loss, pred_loss = self._step(input_imgs, classes)
+                losses.append(loss)
+                ae_losses.append(ae_loss)
+                pred_losses.append(pred_loss)
+                progress.set_postfix(
+                    loss=np.average(losses),
+                    ae=np.average(ae_losses),
+                    pred=np.average(pred_losses)
+                )
+                progress.update(1)
+            progress.close()
+
+
+
