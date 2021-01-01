@@ -12,15 +12,17 @@ from tqdm import tqdm
 import numpy as np
 import pdb
 
+def leaky_relu(x, alpha=0.3):
+  return tf.keras.activations.relu(alpha=alpha)
+
 class MLP(tf.Module):
     def __init__(self, n_classes, dropout=0.2, name=None):
         super().__init__(name=name)
         assert n_classes <= 16, "max number of classes is 16"
         self.drop = Dropout(dropout)
-        self.p1 = Dense(128, activation='relu')
-        self.p2 = Dense(64, activation='relu')
-        self.p3 = Dense(32, activation='relu')
-        self.p4 = Dense(16, activation='relu')
+        self.p1 = Dense(64, activation=leaky_relu)
+        self.p2 = Dense(32, activation=leaky_relu)
+        self.p3 = Dense(16, activation=leaky_relu)
         self.prediction = Dense(n_classes, activation='softmax')
 
     def __call__(self, x):
@@ -29,9 +31,6 @@ class MLP(tf.Module):
         x = self.p2(x)
         x = self.drop(x)
         x = self.p3(x)
-        x = self.drop(x)
-        x = self.p4(x)
-        x = self.drop(x)
         return self.prediction(x)
 
 class AutoEncoder(tf.Module):
@@ -135,7 +134,7 @@ class AE_w_predicter(tf.Module):
         self.pred_optim.apply_gradients(zip(pred_grads, self.predicter.trainable_variables))
         return loss, ae_loss, pred_loss
 
-    def train(self, images, labels, batch_size, n_epochs):
+    def train(self, images, labels, batch_size, n_epochs, normalize=1.0):
         size = labels.shape[0]
         order = np.arange(size)
         n_batches = size // batch_size + (size % batch_size > 0)
@@ -153,7 +152,7 @@ class AE_w_predicter(tf.Module):
                 batch_idx = order[i * batch_size:(i+1) * batch_size]
                 input_imgs = images[batch_idx]
                 classes = labels[batch_idx]
-                loss, ae_loss, pred_loss = self._step(input_imgs, classes)
+                loss, ae_loss, pred_loss = self._step(input_imgs/normalize, classes)
                 losses.append(loss)
                 ae_losses.append(ae_loss)
                 pred_losses.append(pred_loss)
@@ -164,6 +163,30 @@ class AE_w_predicter(tf.Module):
                 )
                 progress.update(1)
             progress.close()
-
+            
+    def train_generator(self, generator, n_epochs, normalize=1.0):
+        for epoch in range(n_epochs):
+            progress = tqdm(
+                total = len(generator),
+                desc = f'Epoch {epoch + 1}/{n_epochs}',
+                unit = 'Batch'
+            )
+            losses = []
+            ae_losses = []
+            pred_losses = []
+            for i in range(len(generator)):
+                input_imgs, classes = generator[i]
+                loss, ae_loss, pred_loss = self._step(input_imgs/normalize, classes)
+                losses.append(loss)
+                ae_losses.append(ae_loss)
+                pred_losses.append(pred_loss)
+                progress.set_postfix(
+                    loss=np.average(losses),
+                    ae=np.average(ae_losses),
+                    pred=np.average(pred_losses)
+                )
+                progress.update(1)
+            generator.on_epoch_end()
+            progress.close()
 
 
